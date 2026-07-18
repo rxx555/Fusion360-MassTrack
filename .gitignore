@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS / editors
+.DS_Store
+Thumbs.db
+
+# Excel lock files
+~$*
+
+# Generated per-document output (created when the add-in runs)
+*.xlsx
+*.backup.xlsx
+mass.csv
+totals_history.csv
+parts_history.csv
+last.json
+diagram.png

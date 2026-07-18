@@ -1,0 +1,11 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "id": "3c8f21ad-9e04-4b7a-8f16-2d41b8f0c7e3",
+    "author": "rx",
+    "description": "Mark components or bodies and export their mass to Excel.",
+    "version": "1.0.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
