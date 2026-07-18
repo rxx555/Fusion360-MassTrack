@@ -137,28 +137,86 @@ def _save_setting(field, value):
         _log("save setting failed:\n" + traceback.format_exc())
 
 
-def _doc_link_url(doc_dir):
-    """Fusion Team web URL for the active document, or '' if unavailable.
+def _url_for_datafile(df):
+    """Fusion Team web URL for a given DataFile, or '' if unavailable.
 
+    Format (verified against a live hub):
+      <hub>/g/projects/<numeric project id>/data/<b64url folder urn>/<b64url lineage urn>/overview
     Hub subdomain comes from the one-time 'Set Hub URL' setting since the API
     doesn't expose it cleanly.
     """
+    if not df:
+        return ""
     try:
-        df = _app.activeDocument.dataFile
+        lineage = df.id                        # urn:adsk.wipprod:dm.lineage:...
+        folder = df.parentFolder.id if df.parentFolder else ""
+        projraw = df.parentProject.id if df.parentProject else ""
     except Exception:
-        return ""                              # unsaved / local
-    urn = proj = ""
+        return ""
+    base = _load_setting("hub_base")
+    if not (base and lineage and folder and projraw):
+        return ""
+    import base64
+    # parentProject.id is 'a.<base64(business:<hub>#<projectnum>)>'; the web URL
+    # uses the numeric project id that follows '#'
+    proj = projraw
     try:
-        urn = df.id
-        proj = df.parentProject.id if df.parentProject else ""
+        if projraw.startswith("a."):
+            dec = base64.b64decode(projraw[2:] + "===").decode("utf-8", "replace")
+            proj = dec.rsplit("#", 1)[-1]
     except Exception:
         pass
-    from urllib.parse import quote
-    base = _load_setting("hub_base")
-    if base and proj and urn:
-        return "%s/g/projects/%s/data/%s" % (
-            base.rstrip("/"), proj, quote(urn, safe=""))
-    return ""
+
+    def _b64(u):
+        return base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")
+
+    return "%s/g/projects/%s/data/%s/%s/overview" % (
+        base.rstrip("/"), proj, _b64(folder), _b64(lineage))
+
+
+def _doc_link_url(doc_dir):
+    """Fusion Team web URL for the active (master) document, or '' if local."""
+    try:
+        return _url_for_datafile(_app.activeDocument.dataFile)
+    except Exception:
+        return ""
+
+
+def _component_source_datafile(comp, design):
+    """DataFile of the external file a component comes from (its own sub-assembly
+    / component file inserted as a reference), or None when the component is
+    internal to the active document and so has no separate file to open."""
+    try:
+        occs = design.rootComponent.allOccurrencesByComponent(comp)
+        if occs.count == 0:
+            return None
+        occ = occs.item(0)
+        if not occ.isReferencedComponent:
+            return None
+        src = occ.component.parentDesign.parentDocument.dataFile
+        active = _app.activeDocument.dataFile
+        if src and (not active or src.id != active.id):
+            _log("xref link: %s -> %s" % (comp.name, src.name))
+            return src
+    except Exception:
+        _log("xref source lookup failed for %s:\n%s"
+             % (getattr(comp, "name", "?"), traceback.format_exc(limit=2)))
+    return None
+
+
+def _entity_link_url(ent, kind, design, master_url):
+    """URL that opens the file the marked entity lives in: its own component /
+    sub-assembly file when that is an external reference, else the master."""
+    try:
+        comp = ent if kind == "component" else ent.parentComponent
+        df = _component_source_datafile(comp, design)
+        if df:
+            u = _url_for_datafile(df)
+            if u:
+                return u
+    except Exception:
+        _log("entity link failed:\n" + traceback.format_exc())
+    return master_url
 
 
 def _open_externally(path):
@@ -180,6 +238,52 @@ def _open_externally(path):
                 os.startfile(path)
         except Exception:
             _log("open failed:\n" + traceback.format_exc())
+
+
+def _excel_save_close(path):
+    """macOS: if Excel already has this workbook open, save it (keeping the
+    user's Work-sheet edits) and close it, so the rebuild that follows is not
+    masked by Excel's cached copy. Excel will not hot-reload a file changed on
+    disk, so a snapshot/regenerate otherwise looks like it did nothing until the
+    user manually closes and reopens. No-op if Excel isn't running or the
+    workbook isn't open. Windows locks the file instead, handled at the call
+    site.
+    """
+    if sys.platform != "darwin":
+        return
+    name = os.path.basename(path)
+    script = (
+        'on run argv\n'
+        '  set n to item 1 of argv\n'
+        '  if application "Microsoft Excel" is running then\n'
+        '    tell application "Microsoft Excel"\n'
+        '      repeat with w in workbooks\n'
+        '        try\n'
+        '          if (name of w) is n then\n'
+        '            save w\n'
+        '            close w saving yes\n'
+        '          end if\n'
+        '        end try\n'
+        '      end repeat\n'
+        '    end tell\n'
+        '  end if\n'
+        'end run\n')
+    try:
+        subprocess.run(["osascript", "-e", script, name],
+                       capture_output=True, timeout=25)
+    except Exception:
+        _log("excel save/close failed:\n" + traceback.format_exc())
+
+
+def _refresh_workbook(doc_dir):
+    """Rebuild the workbook and show it, refreshing Excel even when the file is
+    already open (close it first, rebuild, reopen). Returns the path or None."""
+    out = os.path.join(doc_dir, os.path.basename(doc_dir) + ".xlsx")
+    _excel_save_close(out)
+    built = _build_workbook(doc_dir)
+    if built:
+        _open_externally(built)
+    return built
 
 
 # "Diagram" is deliberately absent: _add_diagram_sheet owns it, and a normal
@@ -713,6 +817,53 @@ def _build_workbook(doc_dir):
         wk["A3"].font = Font(name=FN, bold=True, color=INK)
         wk["B3"].font = Font(name=FN, bold=True, color=ACCENT)
 
+        # Diagram: re-embed from the persistent PNG on EVERY rebuild. A
+        # load->save cycle without Pillow drops embedded images, so the picture
+        # must be re-added each time or it vanishes on the next regenerate.
+        png = os.path.join(doc_dir, "diagram.png")
+        if os.path.isfile(png):
+            try:
+                from openpyxl.drawing.image import Image as XLImage
+
+                class _RawPNG(XLImage):
+                    def __init__(self, p):
+                        self.ref = p
+                        self.format = "png"
+                        self.anchor = "A1"
+                        self.width, self.height = _png_size(p)
+
+                    def _data(self):
+                        with open(self.ref, "rb") as f:
+                            return f.read()
+
+                if "Diagram" in wb.sheetnames:
+                    del wb["Diagram"]
+                wd = wb.create_sheet("Diagram")
+                wd.sheet_view.showGridLines = False
+                wd["A1"] = docname + " (captured view)"
+                wd["A1"].font = Font(name=FN, size=14, bold=True, color=ACCENTD)
+                dimg = _RawPNG(png)
+                if dimg.width > 900:
+                    dimg.height = max(1, int(round(dimg.height * 900.0 / dimg.width)))
+                    dimg.width = 900
+                wd.add_image(dimg, "A3")
+                for w_, letter in ((5, "N"), (34, "O"), (12, "P")):
+                    wd.column_dimensions[letter].width = w_
+                for j, lab in enumerate(("#", "Part", "Mass (g)")):
+                    hc = wd.cell(2, 14 + j, lab)
+                    hc.font = Font(name=FN, bold=True, color=HDRTX)
+                    hc.fill = _fill(ACCENT)
+                for i, x in enumerate(recs):
+                    rr = 3 + i
+                    nc = wd.cell(rr, 14, i + 1)
+                    nc.alignment = RIGHT
+                    wd.cell(rr, 15, x["name"]).font = Font(name=FN, color=INK)
+                    mc = wd.cell(rr, 16, x["eff_tot"])
+                    mc.number_format = F_MASS
+                    mc.alignment = RIGHT
+            except Exception:
+                _log("diagram embed failed:\n" + traceback.format_exc())
+
         # generated sheets first, then user sheets
         for wsx in wb.worksheets:
             if wsx.title in GENERATED_SHEETS:
@@ -769,76 +920,6 @@ def _png_size(path):
         raise ValueError("not a PNG: " + path)
     return (int.from_bytes(h[16:20], "big"),
             int.from_bytes(h[20:24], "big"))
-
-
-def _add_diagram_sheet(doc_dir):
-    """Rebuild the Diagram sheet (view PNG + numbered legend) in the workbook.
-
-    Returns the workbook path, or None on any failure. The embedded PNG reads
-    its dimensions from the IHDR header, bypassing openpyxl's Pillow
-    dependency (Pillow is not vendored).
-    """
-    try:
-        vendor = os.path.join(ADDIN_DIR, "vendor")
-        if vendor not in sys.path:
-            sys.path.insert(0, vendor)
-        from openpyxl import load_workbook
-        from openpyxl.styles import Font, Alignment
-        from openpyxl.drawing.image import Image as XLImage
-
-        class _RawPNG(XLImage):
-            def __init__(self, p):
-                self.ref = p
-                self.format = "png"
-                self.anchor = "A1"
-                self.width, self.height = _png_size(p)
-
-            def _data(self):
-                with open(self.ref, "rb") as f:
-                    return f.read()
-
-        docname = os.path.basename(doc_dir)
-        out = os.path.join(doc_dir, docname + ".xlsx")
-        png = os.path.join(doc_dir, "diagram.png")
-        if not os.path.isfile(out) or not os.path.isfile(png):
-            return None
-
-        wb = load_workbook(out)
-        if "Diagram" in wb.sheetnames:
-            del wb["Diagram"]
-        ws = wb.create_sheet("Diagram")
-        ws.sheet_view.showGridLines = True
-        ws["A1"] = docname + " (captured view)"
-        ws["A1"].font = Font(size=14, bold=True)
-
-        img = _RawPNG(png)
-        if img.width > 800:
-            img.height = max(1, int(round(img.height * 800.0 / img.width)))
-            img.width = 800
-        ws.add_image(img, "A3")
-
-        mass = _read_csv(os.path.join(doc_dir, "mass.csv"))
-        rows = mass[1:] if len(mass) > 1 else []
-        col = 14                                # column N, right of the image
-        for w, letter in ((5, "N"), (34, "O"), (12, "P")):
-            ws.column_dimensions[letter].width = w
-        for j, lab in enumerate(("#", "Part", "Mass (g)")):
-            ws.cell(2, col + j, lab).font = Font(bold=True)
-        for i, r in enumerate(rows):
-            rr = 3 + i
-            ws.cell(rr, col, i + 1)
-            ws.cell(rr, col + 1, r[3] if len(r) > 3 else "")
-            mc = ws.cell(rr, col + 2, _num(r[11]) if len(r) > 11 else None)
-            mc.number_format = '#,##0.0'
-            mc.alignment = Alignment(horizontal="right")
-
-        tmp = out + ".tmp"
-        wb.save(tmp)
-        os.replace(tmp, out)
-        return out
-    except Exception:
-        _log("diagram sheet failed:\n" + traceback.format_exc())
-        return None
 
 
 def _doc_dir(outdir, docname):
@@ -1166,7 +1247,7 @@ def do_export(silent=True, outdir=None, label="", force_history=False):
     for key, kind, ent in marked:
         try:
             row = _props_row(key, kind, ent, design, ts, docname)
-            row.append(doc_url)
+            row.append(_entity_link_url(ent, kind, design, doc_url))
             rows.append(row)
         except Exception:
             errors.append("%s (%s): %s" % (
@@ -1324,7 +1405,7 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                 label = args.command.commandInputs.itemById("label").value.strip()
                 path = do_export(silent=False, label=label, force_history=True)
                 if path:
-                    _build_workbook(os.path.dirname(path))
+                    _refresh_workbook(os.path.dirname(path))
 
             elif self.cmd_id == "mtDiagram":
                 path = do_export(silent=False)
@@ -1335,17 +1416,14 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                 if not _capture_view(png):
                     _ui.messageBox("Could not capture the view.", "MassTrack")
                     return
-                # rebuild first: reloading the workbook drops embedded images
-                # (no Pillow), so the diagram sheet must be written last
-                _build_workbook(doc_dir)
-                out = _add_diagram_sheet(doc_dir)
-                if out:
-                    _open_externally(out)
-                else:
+                # _build_workbook embeds the diagram from the PNG it just wrote,
+                # and re-embeds it on every later rebuild so it never vanishes
+                out = _refresh_workbook(doc_dir)
+                if not out:
                     _ui.messageBox(
-                        "Could not add the Diagram sheet. If the workbook is "
-                        "open in Excel, close it and try again. Otherwise see "
-                        "the MassTrack log.", "MassTrack")
+                        "Could not build the workbook. If it is open in Excel, "
+                        "close it and try again. Otherwise see the MassTrack log.",
+                        "MassTrack")
 
             elif self.cmd_id == "mtSetFolder":
                 folder = _prompt_outdir()
@@ -1454,10 +1532,8 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                 if not path:
                     return
                 doc_dir = os.path.dirname(path)
-                wb = _build_workbook(doc_dir)
-                if wb:
-                    _open_externally(wb)
-                else:
+                wb = _refresh_workbook(doc_dir)
+                if not wb:
                     xlsx = os.path.join(doc_dir,
                                         os.path.basename(doc_dir) + ".xlsx")
                     if os.path.isfile(xlsx):
@@ -1505,42 +1581,40 @@ def _make_panel():
 
 
 def run(context):
-    global _app, _ui, _doc_handler
+    global _app, _ui
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
         panel = _make_panel()
         for cmd_id, cmd_name, tooltip in CMDS:
-            # reuse an existing definition rather than delete+recreate: deleting
-            # it also destroys its ribbon control, which is what wiped the user's
-            # promoted-button layout on every reload
-            cmd_def = _ui.commandDefinitions.itemById(cmd_id)
-            if not cmd_def:
-                icon = os.path.join(RES_DIR, cmd_id)
-                if os.path.isdir(icon):
-                    cmd_def = _ui.commandDefinitions.addButtonDefinition(
-                        cmd_id, cmd_name, tooltip, icon)
-                else:
-                    cmd_def = _ui.commandDefinitions.addButtonDefinition(
-                        cmd_id, cmd_name, tooltip)
+            # delete + recreate so every Stop->Run picks up fresh code AND fresh
+            # icons (a reused definition would keep its old icon and handlers)
+            existing = _ui.commandDefinitions.itemById(cmd_id)
+            if existing:
+                existing.deleteMe()
+            icon = os.path.join(RES_DIR, cmd_id)
+            if os.path.isdir(icon):
+                cmd_def = _ui.commandDefinitions.addButtonDefinition(
+                    cmd_id, cmd_name, tooltip, icon)
+            else:
+                cmd_def = _ui.commandDefinitions.addButtonDefinition(
+                    cmd_id, cmd_name, tooltip)
             on_created = _CmdCreated(cmd_id)
             cmd_def.commandCreated.add(on_created)
-            _created.append((cmd_def, on_created))
+            _handlers.append(on_created)
             _cmd_defs.append(cmd_def)
             if panel:
                 ctl = panel.controls.itemById(cmd_id)
-                if ctl is None:
-                    # first time only: seed the default promotion. On later loads
-                    # the control is reused as-is, so wherever the user dragged it
-                    # (ribbon vs overflow) is preserved.
-                    ctl = panel.controls.addCommand(cmd_def)
-                    ctl.isPromoted = cmd_id in PROMOTED
+                if ctl:
+                    ctl.deleteMe()
+                ctl = panel.controls.addCommand(cmd_def)
+                ctl.isPromoted = cmd_id in PROMOTED
                 ctl.isPromotedByDefault = cmd_id in PROMOTED
                 _controls.append(ctl)
 
         on_saved = _DocSaved()
         _app.documentSaved.add(on_saved)
-        _doc_handler = on_saved
+        _handlers.append(on_saved)
         _log("add-in started")
     except Exception:
         if _ui:
@@ -1549,24 +1623,17 @@ def run(context):
 
 
 def stop(context):
-    global _doc_handler
     try:
-        # Detach event handlers so the add-in stops responding and a reload binds
-        # to fresh code -- but DO NOT delete the controls, command definitions, or
-        # panel. Leaving them live is what lets the ribbon layout (which buttons
-        # are promoted, their order) survive Stop -> Run.
-        for cmd_def, h in _created:
+        for ctl in _controls:
             try:
-                cmd_def.commandCreated.remove(h)
+                ctl.deleteMe()
             except Exception:
                 pass
-        _created.clear()
-        if _doc_handler is not None:
+        for cd in _cmd_defs:
             try:
-                _app.documentSaved.remove(_doc_handler)
+                cd.deleteMe()
             except Exception:
                 pass
-            _doc_handler = None
         _controls.clear()
         _cmd_defs.clear()
         _handlers.clear()

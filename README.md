@@ -1,6 +1,6 @@
 # MassTrack
 
-A Fusion 360 add-in that tracks the mass of the parts you mark and exports them to an Excel workbook — per part, with history and charts.
+A Fusion 360 add-in that tracks the mass of the parts you mark and exports them to an Excel workbook for each compoennt or body, with history and charts.
 
 Mark the bodies (or components) you care about; MassTrack reads their physical properties and writes a styled workbook: total mass, breakdown by subassembly and by material, heaviest parts, and mass history. Parts are opt-in — nothing is exported until you mark it, so tool bodies and cutters stay out of the budget.
 
