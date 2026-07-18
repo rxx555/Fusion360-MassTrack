@@ -40,32 +40,32 @@ CSV_HEADER = ["key", "kind", "document", "name", "path", "material", "qty",
               "flag", "note", "timestamp", "subassembly", "file_url"]
 
 CMDS = [
-    ("mtGenerate", "MassTrack: Generate",
+    ("mtxGenerate", "MassTrack: Generate",
      "Export this document's marked parts to its CSV now."),
-    ("mtOpenXlsx", "MassTrack: Open in Excel",
+    ("mtxOpenXlsx", "MassTrack: Open in Excel",
      "Generate, then open this file's CSV in Excel."),
-    ("mtDiagram", "MassTrack: Diagram",
+    ("mtxDiagram", "MassTrack: Diagram",
      "Capture the current 3D view into a Diagram sheet in the workbook, "
      "with a numbered parts legend. Set the view up first; there is no "
      "API to auto-explode."),
-    ("mtSnapshot", "MassTrack: Snapshot",
+    ("mtxSnapshot", "MassTrack: Snapshot",
      "Force a labelled point onto the mass-history curve (e.g. 'isogrid v2')."),
-    ("mtMark", "MassTrack: Mark",
+    ("mtxMark", "MassTrack: Mark",
      "Include the selected components/bodies in the export (uses CAD mass)."),
-    ("mtSetKnown", "MassTrack: Set Mass",
+    ("mtxSetKnown", "MassTrack: Set Mass",
      "Assign a measured mass (g). Overrides CAD mass. "
      "For electronics and parts whose CAD mass is meaningless."),
-    ("mtClearKnown", "MassTrack: Clear Mass",
+    ("mtxClearKnown", "MassTrack: Clear Mass",
      "Revert the selection to CAD-derived mass (keeps it marked)."),
-    ("mtUnmark", "MassTrack: Unmark",
+    ("mtxUnmark", "MassTrack: Unmark",
      "Remove the selected components/bodies from the export."),
-    ("mtShow", "MassTrack: Show Marked",
+    ("mtxShow", "MassTrack: Show Marked",
      "List everything currently marked in this document."),
-    ("mtHighlight", "MassTrack: Highlight Marked",
+    ("mtxHighlight", "MassTrack: Highlight Marked",
      "Select all marked parts so they light up in the browser tree and canvas."),
-    ("mtSetFolder", "MassTrack: Output Folder",
+    ("mtxSetFolder", "MassTrack: Output Folder",
      "Choose the folder where the CSV files are written."),
-    ("mtSetHub", "MassTrack: Set Hub URL",
+    ("mtxSetHub", "MassTrack: Set Hub URL",
      "Paste your Fusion Team base URL once (e.g. https://xxxx.autodesk360.com) "
      "so each row can link to the file. Access still needs an authorised login."),
 ]
@@ -1329,8 +1329,8 @@ class _CmdCreated(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             cmd = args.command
-            if self.cmd_id in ("mtMark", "mtUnmark", "mtSetKnown",
-                               "mtClearKnown"):
+            if self.cmd_id in ("mtxMark", "mtxUnmark", "mtxSetKnown",
+                               "mtxClearKnown"):
                 pick = cmd.commandInputs.addDropDownCommandInput(
                     "pick", "Select",
                     adsk.core.DropDownStyles.TextListDropDownStyle)
@@ -1345,15 +1345,15 @@ class _CmdCreated(adsk.core.CommandCreatedEventHandler):
                 on_input = _InputChanged()
                 cmd.inputChanged.add(on_input)
                 _handlers.append(on_input)
-            if self.cmd_id == "mtSetKnown":
+            if self.cmd_id == "mtxSetKnown":
                 cmd.commandInputs.addStringValueInput(
                     "grams", "Known mass per unit (g)", "")
                 cmd.commandInputs.addStringValueInput(
                     "note", "Note (spec / measured source)", "")
-            if self.cmd_id == "mtSnapshot":
+            if self.cmd_id == "mtxSnapshot":
                 cmd.commandInputs.addStringValueInput(
                     "label", "History-point label", "")
-            if self.cmd_id == "mtSetHub":
+            if self.cmd_id == "mtxSetHub":
                 cmd.commandInputs.addStringValueInput(
                     "hub", "Fusion Team base URL",
                     _load_setting("hub_base") or "https://xxxx.autodesk360.com")
@@ -1396,18 +1396,18 @@ class _CmdExecute(adsk.core.CommandEventHandler):
         try:
             design = adsk.fusion.Design.cast(_app.activeProduct)
 
-            if self.cmd_id == "mtGenerate":
+            if self.cmd_id == "mtxGenerate":
                 path = do_export(silent=False)
                 if path:
                     _build_workbook(os.path.dirname(path))
 
-            elif self.cmd_id == "mtSnapshot":
+            elif self.cmd_id == "mtxSnapshot":
                 label = args.command.commandInputs.itemById("label").value.strip()
                 path = do_export(silent=False, label=label, force_history=True)
                 if path:
                     _refresh_workbook(os.path.dirname(path))
 
-            elif self.cmd_id == "mtDiagram":
+            elif self.cmd_id == "mtxDiagram":
                 path = do_export(silent=False)
                 if not path:
                     return
@@ -1425,13 +1425,13 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                         "close it and try again. Otherwise see the MassTrack log.",
                         "MassTrack")
 
-            elif self.cmd_id == "mtSetFolder":
+            elif self.cmd_id == "mtxSetFolder":
                 folder = _prompt_outdir()
                 if folder:
                     _ui.messageBox("Output folder set to:\n" + folder,
                                    "MassTrack")
 
-            elif self.cmd_id == "mtSetHub":
+            elif self.cmd_id == "mtxSetHub":
                 url = args.command.commandInputs.itemById("hub").value.strip()
                 if url and "autodesk360.com" in url:
                     _save_setting("hub_base", url.rstrip("/"))
@@ -1442,17 +1442,17 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                     _ui.messageBox("That doesn't look like a Fusion Team URL "
                                    "(expected …autodesk360.com).", "MassTrack")
 
-            elif self.cmd_id in ("mtMark", "mtUnmark", "mtSetKnown",
-                                 "mtClearKnown"):
+            elif self.cmd_id in ("mtxMark", "mtxUnmark", "mtxSetKnown",
+                                 "mtxClearKnown"):
                 inputs = args.command.commandInputs
                 sel_input = inputs.itemById("sel")
                 ents = [sel_input.selection(i).entity
                         for i in range(sel_input.selectionCount)]
-                if self.cmd_id == "mtMark":
+                if self.cmd_id == "mtxMark":
                     verb = "Marked %d new item(s) (CAD mass)." % _mark(ents)
-                elif self.cmd_id == "mtUnmark":
+                elif self.cmd_id == "mtxUnmark":
                     verb = "Unmarked %d item(s)." % _unmark(ents)
-                elif self.cmd_id == "mtClearKnown":
+                elif self.cmd_id == "mtxClearKnown":
                     _clear_known_mass(ents)
                     verb = "Reverted selection to CAD mass."
                 else:                            # massSetKnown
@@ -1473,7 +1473,7 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                 do_export(silent=True)
                 _ui.messageBox(verb, "MassTrack")
 
-            elif self.cmd_id == "mtShow":
+            elif self.cmd_id == "mtxShow":
                 if not design:
                     return
                 ts = datetime.datetime.now().isoformat(timespec="seconds")
@@ -1499,7 +1499,7 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                     % (docname, len(lines), total, total / 1000.0,
                        "\n".join(lines) or "(nothing marked)"), "MassTrack")
 
-            elif self.cmd_id == "mtHighlight":
+            elif self.cmd_id == "mtxHighlight":
                 if not design:
                     return
                 sels = _ui.activeSelections
@@ -1527,7 +1527,7 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                     _ui.messageBox("Nothing is marked in this document.",
                                    "MassTrack")
 
-            elif self.cmd_id == "mtOpenXlsx":
+            elif self.cmd_id == "mtxOpenXlsx":
                 path = do_export(silent=False)
                 if not path:
                     return
@@ -1558,9 +1558,9 @@ class _DocSaved(adsk.core.DocumentEventHandler):
 
 
 RES_DIR = os.path.join(ADDIN_DIR, "resources")
-PANEL_ID = "MassTrackPanel"
+PANEL_ID = "MassTrackPanelX"
 # promoted onto the ribbon, rest in overflow
-PROMOTED = {"mtGenerate", "mtOpenXlsx", "mtMark", "mtSetKnown"}
+PROMOTED = {"mtxGenerate", "mtxOpenXlsx", "mtxMark", "mtxSetKnown"}
 
 
 def _make_panel():
@@ -1585,6 +1585,16 @@ def run(context):
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
+        # remove the previous version's panel if it lingers from before the
+        # command IDs were rotated, so there is only one MassTrack panel
+        try:
+            _ws = _ui.workspaces.itemById("FusionSolidEnvironment")
+            _tab = _ws.toolbarTabs.itemById("SolidTab") or _ws.toolbarTabs.item(0)
+            _old = _tab.toolbarPanels.itemById("MassTrackPanel")
+            if _old:
+                _old.deleteMe()
+        except Exception:
+            pass
         panel = _make_panel()
         for cmd_id, cmd_name, tooltip in CMDS:
             # delete + recreate so every Stop->Run picks up fresh code AND fresh
