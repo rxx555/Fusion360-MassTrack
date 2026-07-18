@@ -1625,7 +1625,7 @@ def run(context):
         on_saved = _DocSaved()
         _app.documentSaved.add(on_saved)
         _handlers.append(on_saved)
-        _log("add-in started")
+        _log("add-in started [build=mtx-icons2]")
     except Exception:
         if _ui:
             _ui.messageBox("MassTrack failed to start:\n"
