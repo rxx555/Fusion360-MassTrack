@@ -219,13 +219,16 @@ def _entity_link_url(ent, kind, design, master_url):
     return master_url
 
 
-def _open_externally(path):
-    """Open a file in its default app (Excel for .csv on most setups)."""
+def _open_externally(path, background=False):
+    """Open a file in its default app (Excel for .csv on most setups). With
+    background=True the file opens without bringing Excel in front of Fusion
+    (macOS 'open -g'), so a silent refresh does not steal the user's focus."""
     try:
         if sys.platform == "darwin":
-            r = subprocess.run(["open", "-a", "Microsoft Excel", path])
+            base = ["open", "-g"] if background else ["open"]
+            r = subprocess.run(base + ["-a", "Microsoft Excel", path])
             if r.returncode != 0:
-                subprocess.run(["open", path])
+                subprocess.run(base + [path])
         elif sys.platform.startswith("win"):
             os.startfile(path)
         else:
@@ -233,11 +236,32 @@ def _open_externally(path):
     except Exception:
         try:
             if sys.platform == "darwin":
-                subprocess.Popen(["open", path])
+                subprocess.Popen((["open", "-g"] if background else ["open"])
+                                 + [path])
             else:
                 os.startfile(path)
         except Exception:
             _log("open failed:\n" + traceback.format_exc())
+
+
+_automation_warned = False
+
+
+def _warn_automation_once():
+    """One-time nudge when macOS blocks Excel automation (TCC not granted)."""
+    global _automation_warned
+    if _automation_warned:
+        return
+    _automation_warned = True
+    try:
+        _ui.messageBox(
+            "MassTrack could not tell Excel to refresh the open workbook.\n\n"
+            "Enable it in System Settings > Privacy & Security > Automation > "
+            "Autodesk Fusion > Microsoft Excel, then regenerate.\n\n"
+            "Until then, close the workbook in Excel before regenerating so the "
+            "new data can load.", "MassTrack")
+    except Exception:
+        pass
 
 
 def _excel_save_close(path):
@@ -248,41 +272,81 @@ def _excel_save_close(path):
     user manually closes and reopens. No-op if Excel isn't running or the
     workbook isn't open. Windows locks the file instead, handled at the call
     site.
+
+    Returns True when Excel was driven cleanly (including the nothing-to-do
+    case), False when the workbook could not be saved/closed (e.g. macOS
+    Automation permission denied, error -1743) so the caller can surface it.
     """
     if sys.platform != "darwin":
-        return
+        return True
+    name = os.path.basename(path)
+    # Address the workbook explicitly by name. 'save'/'close' on a loop variable
+    # from 'repeat with w in workbooks' fails with a -50 parameter error, which
+    # left the stale copy open and made every refresh look like a no-op.
+    script = (
+        'on run argv\n'
+        '  set n to item 1 of argv\n'
+        '  if application "Microsoft Excel" is running then\n'
+        '    tell application "Microsoft Excel"\n'
+        '      if (exists workbook n) then\n'
+        '        save workbook n\n'
+        '        close workbook n saving yes\n'
+        '      end if\n'
+        '    end tell\n'
+        '  end if\n'
+        'end run\n')
+    try:
+        r = subprocess.run(["osascript", "-e", script, name],
+                           capture_output=True, timeout=25)
+        if r.returncode != 0:
+            err = (r.stderr or b"").decode("utf-8", "replace").strip()
+            _log("excel save/close osascript rc=%d: %s" % (r.returncode, err))
+            return False
+        return True
+    except Exception:
+        _log("excel save/close failed:\n" + traceback.format_exc())
+        return False
+
+
+def _excel_active_sheet(path):
+    """Name of the active sheet in the open workbook, or None. Lets a refresh
+    reopen on the sheet the user was viewing instead of jumping to Overview."""
+    if sys.platform != "darwin":
+        return None
     name = os.path.basename(path)
     script = (
         'on run argv\n'
         '  set n to item 1 of argv\n'
         '  if application "Microsoft Excel" is running then\n'
         '    tell application "Microsoft Excel"\n'
-        '      repeat with w in workbooks\n'
-        '        try\n'
-        '          if (name of w) is n then\n'
-        '            save w\n'
-        '            close w saving yes\n'
-        '          end if\n'
-        '        end try\n'
-        '      end repeat\n'
+        '      if (exists workbook n) then\n'
+        '        return name of active sheet of workbook n\n'
+        '      end if\n'
         '    end tell\n'
         '  end if\n'
+        '  return ""\n'
         'end run\n')
     try:
-        subprocess.run(["osascript", "-e", script, name],
-                       capture_output=True, timeout=25)
+        r = subprocess.run(["osascript", "-e", script, name],
+                           capture_output=True, timeout=25)
+        if r.returncode == 0:
+            s = (r.stdout or b"").decode("utf-8", "replace").strip()
+            return s or None
     except Exception:
-        _log("excel save/close failed:\n" + traceback.format_exc())
+        _log("excel active-sheet read failed:\n" + traceback.format_exc())
+    return None
 
 
 def _refresh_workbook(doc_dir):
     """Rebuild the workbook and show it, refreshing Excel even when the file is
     already open (close it first, rebuild, reopen). Returns the path or None."""
     out = os.path.join(doc_dir, os.path.basename(doc_dir) + ".xlsx")
-    _excel_save_close(out)
-    built = _build_workbook(doc_dir)
+    active = _excel_active_sheet(out)          # remember the user's sheet
+    if not _excel_save_close(out):
+        _warn_automation_once()
+    built = _build_workbook(doc_dir, active_sheet=active)
     if built:
-        _open_externally(built)
+        _open_externally(built, background=True)   # refresh without stealing focus
     return built
 
 
@@ -322,7 +386,7 @@ def _read_csv(path):
         return []
 
 
-def _build_workbook(doc_dir):
+def _build_workbook(doc_dir, active_sheet=None):
     try:
         vendor = os.path.join(ADDIN_DIR, "vendor")
         if vendor not in sys.path:
@@ -873,6 +937,11 @@ def _build_workbook(doc_dir):
         order += [n for n in wb.sheetnames if n not in order]
         wb._sheets.sort(key=lambda s: order.index(s.title))
         wb.active = 0
+        if active_sheet and active_sheet in wb.sheetnames:
+            try:
+                wb.active = wb.sheetnames.index(active_sheet)
+            except Exception:
+                pass
 
         try:
             wb.properties.creator = ""
@@ -1509,14 +1578,40 @@ class _CmdExecute(adsk.core.CommandEventHandler):
                 for key, kind, ent in _marked_items(design):
                     try:
                         if kind == "body":
-                            sels.add(ent)
-                            n += 1
+                            # attributes live on the NATIVE body; each occurrence
+                            # needs its own proxy or bodies inside sub-occurrences
+                            # never highlight in the assembly context.
+                            occs = root.allOccurrencesByComponent(
+                                ent.parentComponent)
+                            if occs and occs.count > 0:
+                                added = False
+                                for i in range(occs.count):
+                                    try:
+                                        sels.add(ent.createForAssemblyContext(
+                                            occs.item(i)))
+                                        added = True
+                                    except Exception:
+                                        _log("highlight: no proxy for body '%s' "
+                                             "in %s" % (ent.name,
+                                                        occs.item(i).fullPathName))
+                                if added:
+                                    n += 1
+                            else:                # root-level body: native is valid
+                                sels.add(ent)
+                                n += 1
                         else:                    # component: select its instances
                             occs = root.allOccurrencesByComponent(ent)
                             if occs and occs.count > 0:
+                                added = False
                                 for i in range(occs.count):
-                                    sels.add(occs.item(i))
-                                n += 1
+                                    try:
+                                        sels.add(occs.item(i))
+                                        added = True
+                                    except Exception:
+                                        _log("highlight: cannot select occurrence "
+                                             "%s" % occs.item(i).fullPathName)
+                                if added:
+                                    n += 1
                             else:                # root/no occurrence: its bodies
                                 for b in ent.bRepBodies:
                                     sels.add(b)
