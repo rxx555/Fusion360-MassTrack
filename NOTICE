@@ -10,6 +10,6 @@ Lucide glyphs used:
   Generate = refresh-cw            Open in Excel = file-spreadsheet
   Diagram = box                    Snapshot = camera
   Mark = bookmark-plus             Set Mass = scale
-  Clear Mass = scale + circle-x    Unmark = bookmark-minus
+  Clear Mass = scale + x badge     Unmark = bookmark-minus
   Show Marked = list               Highlight Marked = target
   Output Folder = folder-output    Set Hub URL = cloud-upload
