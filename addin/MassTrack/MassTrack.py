@@ -51,14 +51,22 @@ CMDS = [
     ("mtxSnapshot", "MassTrack: Snapshot",
      "Force a labelled point onto the mass-history curve (e.g. 'isogrid v2')."),
     ("mtxMark", "MassTrack: Mark",
-     "Include the selected components/bodies in the export (uses CAD mass)."),
+     "Include the selected components/bodies in the export (uses CAD mass). "
+     "Not undoable: Fusion does not put attribute changes on the undo stack, so "
+     "Ctrl/Cmd-Z will not unmark. Use Unmark to reverse."),
     ("mtxSetKnown", "MassTrack: Set Mass",
      "Assign a measured mass (g). Overrides CAD mass. "
-     "For electronics and parts whose CAD mass is meaningless."),
+     "For electronics and parts whose CAD mass is meaningless. "
+     "Not undoable: Fusion does not put attribute changes on the undo stack, so "
+     "Ctrl/Cmd-Z will not revert it. Use Clear Mass to remove the override."),
     ("mtxClearKnown", "MassTrack: Clear Mass",
-     "Revert the selection to CAD-derived mass (keeps it marked)."),
+     "Revert the selection to CAD-derived mass (keeps it marked). "
+     "Not undoable: Fusion does not put attribute changes on the undo stack, so "
+     "Ctrl/Cmd-Z will not restore the value. Use Set Mass to reapply it."),
     ("mtxUnmark", "MassTrack: Unmark",
-     "Remove the selected components/bodies from the export."),
+     "Remove the selected components/bodies from the export. "
+     "Not undoable: Fusion does not put attribute changes on the undo stack, so "
+     "Ctrl/Cmd-Z will not restore the mark. Use Mark to re-add."),
     ("mtxShow", "MassTrack: Show Marked",
      "List everything currently marked in this document."),
     ("mtxHighlight", "MassTrack: Highlight Marked",
